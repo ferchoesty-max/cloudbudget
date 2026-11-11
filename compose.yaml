@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: cloudbudget-postgres
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: cloudbudget
+      POSTGRES_PASSWORD: cloudbudget_dev
+      POSTGRES_DB: cloudbudget
+    volumes:
+      - cloudbudget_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudbudget -d cloudbudget"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  api:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgresql://cloudbudget:cloudbudget_dev@postgres:5432/cloudbudget
+      CORS_ORIGIN: http://localhost:3000
+      PORT: "4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NUXT_PUBLIC_API_BASE: http://localhost:4000
+    depends_on:
+      - api
+
+volumes:
+  cloudbudget_pgdata:
+

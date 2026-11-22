@@ -5,21 +5,47 @@ import {
   currentMonth,
   getBudgetStatus,
   monthQuerySchema,
+  summarizeTransactions,
   transactionFilterSchema,
+  transactionsToCsv,
 } from '@cloudbudget/shared'
 import { createApp } from './app.js'
 
 const app = createApp()
 
-describe('CloudBudget API - Salud y Seguridad', () => {
-  it('GET /api/health devuelve estado OK y cabeceras de seguridad', async () => {
+describe('CloudBudget API - Salud, CORS, Rate Limit y Seguridad', () => {
+  it('GET /api/health devuelve OK, trazabilidad y cabeceras de seguridad', async () => {
     const response = await request(app).get('/api/health')
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ status: 'ok', service: 'cloudbudget-api' })
     expect(response.headers['x-powered-by']).toBeUndefined()
+    expect(response.headers['x-request-id']).toBeTruthy()
+    expect(response.headers['x-ratelimit-limit']).toBeTruthy()
     expect(response.headers['x-content-type-options']).toBe('nosniff')
     expect(response.headers['x-frame-options']).toBe('DENY')
     expect(response.headers['referrer-policy']).toBe('no-referrer')
+  })
+
+  it('CORS permite origen autorizado y bloquea origen ajeno con 403', async () => {
+    const allowed = await request(app)
+      .get('/api/health')
+      .set('Origin', 'http://localhost:3000')
+    expect(allowed.status).toBe(200)
+
+    const blocked = await request(app)
+      .get('/api/health')
+      .set('Origin', 'https://sitio-no-autorizado.test')
+    expect(blocked.status).toBe(403)
+    expect(blocked.body.error.message).toBe('Origen CORS no permitido')
+  })
+
+  it('Rate limit devuelve 429 al superar el máximo por ventana', async () => {
+    const limitedApp = createApp({ rateLimitMax: 2, rateLimitWindowMs: 60_000 })
+    expect((await request(limitedApp).get('/api/health')).status).toBe(200)
+    expect((await request(limitedApp).get('/api/health')).status).toBe(200)
+    const third = await request(limitedApp).get('/api/health')
+    expect(third.status).toBe(429)
+    expect(third.body.error.message).toBe('Demasiadas peticiones, intenta de nuevo en un minuto')
   })
 
   it('POST /api/categories rechaza JSON malformado con 400', async () => {
@@ -39,7 +65,7 @@ describe('CloudBudget API - Salud y Seguridad', () => {
     expect(response.body.error.message).toBe('Datos inválidos')
   })
 
-  it('POST /api/transactions rechaza importes negativos o formato de fecha inválido', async () => {
+  it('POST /api/transactions rechaza importes negativos o fecha inválida', async () => {
     const response = await request(app)
       .post('/api/transactions')
       .send({
@@ -60,7 +86,7 @@ describe('CloudBudget API - Salud y Seguridad', () => {
   })
 })
 
-describe('CloudBudget Shared - Contratos y Helpers de Presupuesto', () => {
+describe('CloudBudget Shared - Contratos, Presupuestos y CSV', () => {
   it('monthQuerySchema valida YYYY-MM y currentMonth formatea fecha UTC', () => {
     expect(monthQuerySchema.safeParse('2026-11').success).toBe(true)
     expect(monthQuerySchema.safeParse('noviembre-2026').success).toBe(false)
@@ -93,5 +119,37 @@ describe('CloudBudget Shared - Contratos y Helpers de Presupuesto', () => {
     expect(getBudgetStatus(800, 1000)).toBe('warning')
     expect(getBudgetStatus(1000.01, 1000)).toBe('exceeded')
     expect(getBudgetStatus(100, 0)).toBe('exceeded')
+  })
+
+  it('summarizeTransactions calcula totales exactos usando centavos enteros', () => {
+    const summary = summarizeTransactions([
+      { type: 'income', amount: 1000 },
+      { type: 'expense', amount: 0.1 },
+      { type: 'expense', amount: 0.2 },
+    ])
+    expect(summary).toEqual({
+      income: 1000,
+      expense: 0.3,
+      balance: 999.7,
+      count: 3,
+    })
+  })
+
+  it('transactionsToCsv escapa comas y comillas según RFC-4180', () => {
+    const csv = transactionsToCsv([
+      {
+        id: 1,
+        user_id: 1,
+        category_id: 2,
+        category_name: 'Comida, café',
+        type: 'expense',
+        amount: 185.5,
+        description: 'Torta "especial"',
+        occurred_on: '2026-11-22',
+      },
+    ])
+    expect(csv).toBe(
+      'fecha,categoria,tipo,importe,descripcion\n2026-11-22,"Comida, café",expense,185.50,"Torta ""especial"""',
+    )
   })
 })

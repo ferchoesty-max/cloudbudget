@@ -98,3 +98,44 @@ export function getBudgetStatus(spent: number, limit: number): BudgetStatus {
   if (spent >= limit * 0.8) return 'warning'
   return 'ok'
 }
+
+export interface TransactionSummary {
+  income: number
+  expense: number
+  balance: number
+  count: number
+}
+
+// ponytail: acumula en centavos enteros (estilo MoneyCloud) para evitar errores de punto flotante
+export function summarizeTransactions(
+  items: ReadonlyArray<Pick<TransactionItem, 'type' | 'amount'>>,
+): TransactionSummary {
+  let incomeCents = 0
+  let expenseCents = 0
+  for (const item of items) {
+    const cents = Math.round((Number(item.amount) || 0) * 100)
+    if (item.type === 'income') incomeCents += cents
+    else expenseCents += cents
+  }
+  return {
+    income: incomeCents / 100,
+    expense: expenseCents / 100,
+    balance: (incomeCents - expenseCents) / 100,
+    count: items.length,
+  }
+}
+
+function escapeCsvCell(value: unknown): string {
+  const text = String(value ?? '')
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
+}
+
+export function transactionsToCsv(items: ReadonlyArray<TransactionItem>): string {
+  const header = 'fecha,categoria,tipo,importe,descripcion'
+  const rows = items.map((tx) =>
+    [tx.occurred_on, tx.category_name, tx.type, tx.amount.toFixed(2), tx.description]
+      .map(escapeCsvCell)
+      .join(','),
+  )
+  return [header, ...rows].join('\n')
+}

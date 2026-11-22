@@ -6,12 +6,20 @@ import { pool } from './db.js'
 
 export function createApp() {
   const app = express()
+  app.disable('x-powered-by')
   const origins = (process.env.CORS_ORIGIN ?? 'http://localhost:3000')
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean)
 
   app.use(cors({ origin: origins }))
+  // ponytail: headers de seguridad nativos sin agregar dependencia helmet
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    res.setHeader('X-Frame-Options', 'DENY')
+    res.setHeader('Referrer-Policy', 'no-referrer')
+    next()
+  })
   app.use(express.json({ limit: '20kb' }))
 
   app.get('/health', (_req, res) => {
@@ -38,13 +46,21 @@ export function createApp() {
   app.use((_req, res) => res.status(404).json({ error: { message: 'Ruta no encontrada' } }))
 
   const errorHandler: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
-    const dbError = error as { code?: string }
-    if (dbError.code === '23505') {
+    const err = error as { code?: string; status?: number; type?: string }
+    if (err.type === 'entity.parse.failed' || (error instanceof SyntaxError && err.status === 400)) {
+      res.status(400).json({ error: { message: 'JSON inválido en el cuerpo de la petición' } })
+      return
+    }
+    if (err.code === '23505') {
       res.status(409).json({ error: { message: 'El registro ya existe para este usuario' } })
       return
     }
-    if (dbError.code === '23503') {
-      res.status(400).json({ error: { message: 'Usuario o categoría inexistente' } })
+    if (err.code === '23503') {
+      res.status(400).json({ error: { message: 'Usuario o categoría inexistente o en uso' } })
+      return
+    }
+    if (err.code === '23514' || err.code === '22P02') {
+      res.status(400).json({ error: { message: 'Valor fuera de rango o formato inválido' } })
       return
     }
     console.error('Error interno en API:', error)

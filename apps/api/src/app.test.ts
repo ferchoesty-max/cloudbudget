@@ -84,6 +84,18 @@ describe('CloudBudget API - Salud, CORS, Rate Limit y Seguridad', () => {
     expect(response.status).toBe(404)
     expect(response.body.error.message).toBe('Ruta no encontrada')
   })
+
+  it('POST /api/budgets valida el formato YYYY-MM y monto positivo', async () => {
+    const response = await request(app)
+      .post('/api/budgets')
+      .send({
+        category_id: 2,
+        month: 'noviembre-2026',
+        limit_amount: 0,
+      })
+    expect(response.status).toBe(400)
+    expect(response.body.error.message).toBe('Datos inválidos')
+  })
 })
 
 describe('CloudBudget Shared - Contratos, Presupuestos y CSV', () => {

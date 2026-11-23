@@ -223,3 +223,53 @@ routes.post('/budgets', async (req, res, next) => {
     next(error)
   }
 })
+
+routes.get('/reports/monthly', async (req, res) => {
+  const userId = resolveUserId(req)
+  const month = resolveMonth(req.query.month)
+
+  const [totalsResult, budgetsResult] = await Promise.all([
+    pool.query(
+      `SELECT
+         COALESCE(ROUND(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 2), 0)::float AS total_income,
+         COALESCE(ROUND(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 2), 0)::float AS total_expense,
+         COALESCE(ROUND(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 2), 0)::float AS balance
+       FROM transactions
+       WHERE user_id = $1 AND TO_CHAR(occurred_on, 'YYYY-MM') = $2`,
+      [userId, month],
+    ),
+    pool.query(
+      `SELECT
+         b.id,
+         b.user_id,
+         b.category_id,
+         c.name AS category_name,
+         b.month,
+         ROUND(b.limit_amount, 2)::float AS limit_amount,
+         COALESCE(ROUND(SUM(t.amount), 2), 0)::float AS spent_amount,
+         ROUND(b.limit_amount - COALESCE(SUM(t.amount), 0), 2)::float AS remaining_amount
+       FROM budgets b
+       JOIN categories c ON c.id = b.category_id
+       LEFT JOIN transactions t
+         ON t.category_id = b.category_id
+        AND t.user_id = b.user_id
+        AND t.type = 'expense'
+        AND TO_CHAR(t.occurred_on, 'YYYY-MM') = b.month
+       WHERE b.user_id = $1 AND b.month = $2
+       GROUP BY b.id, b.user_id, b.category_id, c.name, b.month, b.limit_amount
+       ORDER BY c.name ASC`,
+      [userId, month],
+    ),
+  ])
+
+  res.json({
+    data: {
+      month,
+      user_id: userId,
+      total_income: totalsResult.rows[0].total_income,
+      total_expense: totalsResult.rows[0].total_expense,
+      balance: totalsResult.rows[0].balance,
+      budgets: budgetsResult.rows,
+    },
+  })
+})

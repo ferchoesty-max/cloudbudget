@@ -1,6 +1,12 @@
 import { Router, type Request } from 'express'
 import { z } from 'zod'
-import { categorySchema, transactionSchema } from '@cloudbudget/shared'
+import {
+  budgetSchema,
+  categorySchema,
+  currentMonth,
+  monthQuerySchema,
+  transactionSchema,
+} from '@cloudbudget/shared'
 import { pool } from './db.js'
 
 export const routes = Router()
@@ -21,6 +27,11 @@ export function invalidResponse(issues: z.ZodIssue[]) {
       })),
     },
   }
+}
+
+function resolveMonth(raw: unknown): string {
+  const parsed = monthQuerySchema.safeParse(raw)
+  return parsed.success ? parsed.data : currentMonth()
 }
 
 routes.get('/health', (_req, res) => {
@@ -140,4 +151,125 @@ routes.delete('/transactions/:id', async (req, res) => {
     return
   }
   res.status(204).send()
+})
+
+routes.get('/budgets', async (req, res) => {
+  const userId = resolveUserId(req)
+  const month = resolveMonth(req.query.month)
+
+  const { rows } = await pool.query(
+    `SELECT
+       b.id,
+       b.user_id,
+       b.category_id,
+       c.name AS category_name,
+       b.month,
+       ROUND(b.limit_amount, 2)::float AS limit_amount,
+       COALESCE(ROUND(SUM(t.amount), 2), 0)::float AS spent_amount,
+       ROUND(b.limit_amount - COALESCE(SUM(t.amount), 0), 2)::float AS remaining_amount
+     FROM budgets b
+     JOIN categories c ON c.id = b.category_id
+     LEFT JOIN transactions t
+       ON t.category_id = b.category_id
+      AND t.user_id = b.user_id
+      AND t.type = 'expense'
+      AND TO_CHAR(t.occurred_on, 'YYYY-MM') = b.month
+     WHERE b.user_id = $1 AND b.month = $2
+     GROUP BY b.id, b.user_id, b.category_id, c.name, b.month, b.limit_amount
+     ORDER BY c.name ASC`,
+    [userId, month],
+  )
+  res.json({ data: rows })
+})
+
+routes.post('/budgets', async (req, res, next) => {
+  const parsed = budgetSchema.safeParse({ ...req.body, user_id: resolveUserId(req) })
+  if (!parsed.success) {
+    res.status(400).json(invalidResponse(parsed.error.issues))
+    return
+  }
+  try {
+    const { user_id, category_id, month, limit_amount } = parsed.data
+    const catCheck = await pool.query(
+      'SELECT id, name, type FROM categories WHERE id = $1 AND user_id = $2',
+      [category_id, user_id],
+    )
+    if (catCheck.rowCount === 0) {
+      res.status(400).json({ error: { message: 'La categoría no pertenece a este usuario' } })
+      return
+    }
+    if (catCheck.rows[0].type !== 'expense') {
+      res.status(400).json({ error: { message: 'Solo se pueden asignar presupuestos a categorías de gasto' } })
+      return
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO budgets (user_id, category_id, month, limit_amount, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (user_id, category_id, month)
+       DO UPDATE SET limit_amount = EXCLUDED.limit_amount, updated_at = NOW()
+       RETURNING id, user_id, category_id, month, ROUND(limit_amount, 2)::float AS limit_amount`,
+      [user_id, category_id, month, limit_amount],
+    )
+    res.status(200).json({
+      data: {
+        ...rows[0],
+        category_name: catCheck.rows[0].name,
+        spent_amount: 0,
+        remaining_amount: rows[0].limit_amount,
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+routes.get('/reports/monthly', async (req, res) => {
+  const userId = resolveUserId(req)
+  const month = resolveMonth(req.query.month)
+
+  const [totalsResult, budgetsResult] = await Promise.all([
+    pool.query(
+      `SELECT
+         COALESCE(ROUND(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 2), 0)::float AS total_income,
+         COALESCE(ROUND(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 2), 0)::float AS total_expense,
+         COALESCE(ROUND(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 2), 0)::float AS balance
+       FROM transactions
+       WHERE user_id = $1 AND TO_CHAR(occurred_on, 'YYYY-MM') = $2`,
+      [userId, month],
+    ),
+    pool.query(
+      `SELECT
+         b.id,
+         b.user_id,
+         b.category_id,
+         c.name AS category_name,
+         b.month,
+         ROUND(b.limit_amount, 2)::float AS limit_amount,
+         COALESCE(ROUND(SUM(t.amount), 2), 0)::float AS spent_amount,
+         ROUND(b.limit_amount - COALESCE(SUM(t.amount), 0), 2)::float AS remaining_amount
+       FROM budgets b
+       JOIN categories c ON c.id = b.category_id
+       LEFT JOIN transactions t
+         ON t.category_id = b.category_id
+        AND t.user_id = b.user_id
+        AND t.type = 'expense'
+        AND TO_CHAR(t.occurred_on, 'YYYY-MM') = b.month
+       WHERE b.user_id = $1 AND b.month = $2
+       GROUP BY b.id, b.user_id, b.category_id, c.name, b.month, b.limit_amount
+       ORDER BY c.name ASC`,
+      [userId, month],
+    ),
+  ])
+
+  res.json({
+    data: {
+      month,
+      user_id: userId,
+      total_income: totalsResult.rows[0].total_income,
+      total_expense: totalsResult.rows[0].total_expense,
+      balance: totalsResult.rows[0].balance,
+      budgets: budgetsResult.rows,
+    },
+  })
 })
